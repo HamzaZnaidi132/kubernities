@@ -92,49 +92,86 @@ pipeline {
                 script {
                     def namespace = env.K8S_NAMESPACE
 
+                    // Diagnostic d'abord
+                    sh """
+                echo "=== Diagnostic du cluster ==="
+                echo "1. Vérification des pods :"
+                kubectl get pods -n ${namespace}
+                echo ""
+                
+                echo "2. Vérification des services :"
+                kubectl get svc -n ${namespace}
+                echo ""
+                
+                echo "3. Vérification des endpoints :"
+                kubectl get endpoints -n ${namespace}
+                echo ""
+                
+                echo "4. Obtenir l'URL du service :"
+                minikube service list -n ${namespace}
+                echo ""
+            """
+
                     // Attendre que le pod soit prêt
                     sh """
-                        echo "Attente du démarrage du pod..."
-                        kubectl wait --for=condition=ready pod -l app=spring-app -n ${namespace} --timeout=300s || true
-                        
-                        # Obtenir le nom du pod
-                        POD_NAME=\$(kubectl get pods -l app=spring-app -n ${namespace} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-                        
-                        if [ -n "\$POD_NAME" ]; then
-                            echo "Pod trouvé: \$POD_NAME"
-                            # Tester la connectivité interne
-                            kubectl exec \$POD_NAME -n ${namespace} -- curl -s http://localhost:8080/actuator/health || echo "Test de santé échoué"
-                        else
-                            echo "Aucun pod trouvé"
-                        fi
-                    """
+                echo "Attente du démarrage du pod..."
+                timeout 300 bash -c 'until kubectl get pods -l app=spring-app -n ${namespace} --field-selector=status.phase=Running 2>/dev/null | grep -q Running; do sleep 10; echo "En attente..."; done'
+            """
+
+                    // Vérifier les logs du pod
+                    sh """
+                echo "=== Logs de l'application ==="
+                POD_NAME=\$(kubectl get pods -l app=spring-app -n ${namespace} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+                if [ -n "\$POD_NAME" ]; then
+                    echo "Pod: \$POD_NAME"
+                    kubectl logs \$POD_NAME -n ${namespace} --tail=20
+                fi
+            """
+
+                    // Tester la connectivité interne d'abord
+                    sh """
+                echo "=== Test de connectivité interne ==="
+                POD_NAME=\$(kubectl get pods -l app=spring-app -n ${namespace} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+                if [ -n "\$POD_NAME" ]; then
+                    echo "Test curl depuis l'intérieur du pod :"
+                    kubectl exec \$POD_NAME -n ${namespace} -- curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/actuator/health || echo "Échec"
+                    echo ""
+                    
+                    echo "Test API depuis l'intérieur du pod :"
+                    kubectl exec \$POD_NAME -n ${namespace} -- curl -s http://localhost:8080/api/departments/getAllDepartment || echo "Échec"
+                fi
+            """
+
+                    // Tester la connectivité externe
+                    sh """
+                echo "=== Test de connectivité externe ==="
+                
+                # Méthode 1: Port-forward temporaire
+                echo "Méthode 1: Port-forward"
+                timeout 30 kubectl port-forward svc/spring-service 8080:8080 -n ${namespace} &
+                PF_PID=\$!
+                sleep 5
+                
+                echo "Test via port-forward:"
+                curl -s -o /dev/null -w "Code HTTP: %{http_code}\n" http://localhost:8080/actuator/health || echo "Port-forward échoué"
+                kill \$PF_PID 2>/dev/null
+                echo ""
+                
+                # Méthode 2: Service NodePort
+                echo "Méthode 2: Via NodePort"
+                NODE_PORT=\$(kubectl get svc spring-service -n ${namespace} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
+                MINIKUBE_IP=\$(minikube ip 2>/dev/null || echo "192.168.49.2")
+                
+                if [ -n "\$NODE_PORT" ]; then
+                    echo "NodePort: \$NODE_PORT, Minikube IP: \$MINIKUBE_IP"
+                    echo "URL: http://\${MINIKUBE_IP}:\${NODE_PORT}/actuator/health"
+                    curl -s -o /dev/null -w "Code HTTP: %{http_code}\n" http://\${MINIKUBE_IP}:\${NODE_PORT}/actuator/health || echo "Échec de connexion"
+                else
+                    echo "Aucun NodePort trouvé pour le service spring-service"
+                fi
+            """
                 }
             }
-        }
-    }
-
-    post {
-        always {
-            echo "Pipeline terminé - Status: ${currentBuild.result}"
-            cleanWs()  // Nettoyer l'espace de travail
-        }
-        success {
-            echo "Build, Push et Déploiement effectués avec succès!"
-            // Optionnel: Envoyer un email
-            emailext (
-                    subject: "SUCCÈS: Pipeline ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
-                    body: "Le pipeline a réussi!\n\nJob: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nURL: ${env.BUILD_URL}",
-                    to: 'hamzaznaidi539@gmail.com'  // Remplacez par votre email
-            )
-        }
-        failure {
-            echo "Le pipeline a échoué."
-            // Optionnel: Envoyer un email d'erreur
-            emailext (
-                    subject: "ÉCHEC: Pipeline ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
-                    body: "Le pipeline a échoué!\n\nJob: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nURL: ${env.BUILD_URL}\n\nConsultez les logs pour plus de détails.",
-                    to: 'hamzaznaidi539@gmail.com'  // Remplacez par votre email
-            )
         }
     }
 }
