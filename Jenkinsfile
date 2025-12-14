@@ -6,11 +6,7 @@ pipeline {
         IMAGE_NAME = "hamzaznaidi/foyer_project"
         IMAGE_TAG = "latest"
         K8S_NAMESPACE = "devops"
-        K8S_NAMESPACE = 'foyer-production'
-        K8S_DEPLOYMENT = 'foyer-app'
-        K8S_SERVICE = 'foyer-service'
-        K8S_CONFIG_PATH = 'kubernetes/'
-        K8S_CONTEXT = 'production-cluster'
+
     }
 
     triggers {
