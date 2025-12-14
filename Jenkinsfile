@@ -55,33 +55,85 @@ pipeline {
             steps {
                 echo "Déploiement sur Kubernetes..."
                 script {
-                    // Utiliser K8S_NAMESPACE au lieu de KUBE_NAMESPACE
                     def namespace = env.K8S_NAMESPACE
 
                     // Créer le namespace s'il n'existe pas
                     sh "kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f - || true"
 
-                    // Vérifier si les fichiers existent avant de les appliquer
-                    def files = ['k8s/mysql-deployment.yaml', 'k8s/spring-config.yaml', 'k8s/spring-secret.yaml']
-                    files.each { file ->
-                        if (fileExists(file)) {
-                            sh "kubectl apply -f ${file} -n ${namespace}"
-                        } else {
-                            echo "Fichier ${file} non trouvé, ignoré"
-                        }
+                    // Apply MySQL deployment if exists
+                    if (fileExists('k8s/mysql-deployment.yaml')) {
+                        sh "kubectl apply -f k8s/mysql-deployment.yaml -n ${namespace}"
+                        // Wait for MySQL to be ready
+                        sh """
+                    echo "Attente du démarrage de MySQL..."
+                    kubectl wait --for=condition=ready pod -l app=mysql -n ${namespace} --timeout=120s || true
+                """
                     }
 
-                    // Mettre à jour l'image du déploiement Spring Boot
+                    // Apply config and secrets if they exist
+                    if (fileExists('k8s/spring-config.yaml')) {
+                        sh "kubectl apply -f k8s/spring-config.yaml -n ${namespace}"
+                    }
+                    if (fileExists('k8s/spring-secret.yaml')) {
+                        sh "kubectl apply -f k8s/spring-secret.yaml -n ${namespace}"
+                    }
+
+                    // Deploy Spring application
                     sh """
-                        if kubectl get deployment spring-app -n ${namespace} 2>/dev/null; then
-                            kubectl set image deployment/spring-app spring-app=${IMAGE_NAME}:${IMAGE_TAG} -n ${namespace}
-                            kubectl rollout status deployment/spring-app -n ${namespace} --timeout=300s
-                        else
-                            echo "Le déploiement spring-app n'existe pas, création..."
-                            // Créer un déploiement minimal si nécessaire
-                            kubectl create deployment spring-app --image=${IMAGE_NAME}:${IMAGE_TAG} -n ${namespace} || true
-                        fi
-                    """
+                # Create or update deployment
+                if kubectl get deployment spring-app -n ${namespace} 2>/dev/null; then
+                    echo "Mise à jour du déploiement existant..."
+                    kubectl set image deployment/spring-app spring-app=${IMAGE_NAME}:${IMAGE_TAG} -n ${namespace}
+                else
+                    echo "Création d'un nouveau déploiement..."
+                    kubectl create deployment spring-app --image=${IMAGE_NAME}:${IMAGE_TAG} -n ${namespace} || true
+                    
+                    # Add basic probes if not exists
+                    kubectl patch deployment spring-app -n ${namespace} -p '{
+                        "spec": {
+                            "template": {
+                                "spec": {
+                                    "containers": [{
+                                        "name": "spring-app",
+                                        "livenessProbe": {
+                                            "httpGet": {
+                                                "path": "/actuator/health",
+                                                "port": 8080
+                                            },
+                                            "initialDelaySeconds": 60,
+                                            "periodSeconds": 10
+                                        },
+                                        "readinessProbe": {
+                                            "httpGet": {
+                                                "path": "/actuator/health",
+                                                "port": 8080
+                                            },
+                                            "initialDelaySeconds": 30,
+                                            "periodSeconds": 5
+                                        }
+                                    }]
+                                }
+                            }
+                        }
+                    }' || true
+                fi
+                
+                # Wait for rollout with better debugging
+                echo "Attente du déploiement..."
+                kubectl rollout status deployment/spring-app -n ${namespace} --timeout=300s || {
+                    echo "Rollout échoué - diagnostic:"
+                    kubectl get pods -n ${namespace} -l app=spring-app -o wide
+                    kubectl describe deployment spring-app -n ${namespace}
+                    
+                    # Get logs from failing pods
+                    kubectl get pods -n ${namespace} -l app=spring-app -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | while read pod; do
+                        echo "=== Logs du pod \$pod ==="
+                        kubectl logs \$pod -n ${namespace} --tail=50 || true
+                    done
+                    
+                    exit 1
+                }
+            """
                 }
             }
         }
@@ -192,7 +244,6 @@ pipeline {
                 }
             }
         }
-
     }
 
 }
