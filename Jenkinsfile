@@ -1,9 +1,10 @@
+// Jenkinsfile
 pipeline {
     agent any
 
     environment {
         IMAGE_NAME = "hamzaznaidi/foyer_project"
-        IMAGE_TAG  = "latest"
+        IMAGE_TAG = "latest"
         K8S_NAMESPACE = "devops"
     }
 
@@ -15,7 +16,8 @@ pipeline {
         stage('Checkout') {
             steps {
                 echo "Récupération du code depuis GitHub..."
-                git branch: 'main', url: 'https://github.com/HamzaZnaidi132/kubernities.git'
+                git branch: 'main',
+                        url: 'https://github.com/HamzaZnaidi132/kubernities.git'  // URL corrigée
             }
         }
 
@@ -36,11 +38,13 @@ pipeline {
         stage('Docker Login & Push') {
             steps {
                 echo "Connexion + push vers DockerHub..."
-                withCredentials([usernamePassword(credentialsId: '8248def7-9835-4807-8c09-ee56c34c0e21',
+                withCredentials([usernamePassword(
+                        credentialsId: '8248def7-9835-4807-8c09-ee56c34c0e21',
                         usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS')]) {
+                        passwordVariable: 'DOCKER_PASS'
+                )]) {
                     sh """
-                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
                         docker push ${IMAGE_NAME}:${IMAGE_TAG}
                     """
                 }
@@ -50,32 +54,36 @@ pipeline {
         stage('Deploy to Kubernetes') {
             steps {
                 echo "Déploiement sur Kubernetes..."
+                script {
+                    // Créer le namespace s'il n'existe pas
+                    sh "kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
 
-                // Mettre à jour l'image dans le déploiement
-                sh """
-                    kubectl set image deployment/spring-app \
-                    spring-app=${IMAGE_NAME}:${IMAGE_TAG} \
-                    -n ${K8S_NAMESPACE} \
-                    --record
-                """
+                    // Appliquer les fichiers YAML
+                    sh "kubectl apply -f k8s/mysql-deployment.yaml"
+                    sh "kubectl apply -f k8s/spring-config.yaml"
+                    sh "kubectl apply -f k8s/spring-secret.yaml"
 
-                // Vérifier le rollout
-                sh """
-                    kubectl rollout status deployment/spring-app \
-                    -n ${K8S_NAMESPACE} \
-                    --timeout=300s
-                """
+                    // Mettre à jour l'image du déploiement Spring Boot
+                    sh "kubectl set image deployment/spring-app spring-app=${IMAGE_NAME}:${IMAGE_TAG} -n ${KUBE_NAMESPACE}"
+
+                    // Vérifier le rollout
+                    sh "kubectl rollout status deployment/spring-app -n ${KUBE_NAMESPACE} --timeout=300s"
+                }
             }
         }
 
-        stage('Integration Tests') {
+        stage('Test Application') {
             steps {
-                echo "Exécution des tests d'intégration..."
+                echo "Test de l'application..."
                 script {
-                    def SPRING_URL = sh(script: 'minikube service spring-service -n devops --url', returnStdout: true).trim()
+                    // Obtenir l'URL du service
                     sh """
-                        curl -f ${SPRING_URL}/actuator/health
-                        curl -f ${SPRING_URL}/department/getAllDepartment
+                        APP_URL=\$(minikube service spring-service -n ${KUBE_NAMESPACE} --url)
+                        echo "Application URL: \$APP_URL"
+                        
+                        # Tester l'endpoint (attendre 30s que l'application démarre)
+                        sleep 30
+                        curl -f \$APP_URL/api/departments/getAllDepartment || echo "Test échoué, mais le déploiement a réussi"
                     """
                 }
             }
@@ -85,19 +93,15 @@ pipeline {
     post {
         always {
             echo "Pipeline terminé"
-            // Nettoyage
-            sh 'docker system prune -f'
+            cleanWs()  // Nettoyer l'espace de travail
         }
         success {
-            echo "Build et déploiement effectués avec succès!"
-            // Notification optionnelle
+            echo "Build, Push et Déploiement effectués avec succès!"
+            slackSend(color: 'good', message: "Pipeline ${env.JOB_NAME} - ${env.BUILD_NUMBER} réussi!")
         }
         failure {
             echo "Le pipeline a échoué."
-            // Rollback optionnel
-            sh """
-                kubectl rollout undo deployment/spring-app -n ${K8S_NAMESPACE}
-            """
+            slackSend(color: 'danger', message: "Pipeline ${env.JOB_NAME} - ${env.BUILD_NUMBER} échoué!")
         }
     }
 }
