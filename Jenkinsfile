@@ -133,6 +133,7 @@ pipeline {
                     kubectl logs \$POD_NAME -n ${namespace} --tail=30
                 fi
                 echo ""
+               
                 
                 # 5. Vérifier la configuration réseau
                 echo "5. Vérification réseau:"
