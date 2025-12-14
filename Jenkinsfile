@@ -1,4 +1,3 @@
-// Jenkinsfile
 pipeline {
     agent any
 
@@ -88,53 +87,110 @@ pipeline {
 
         stage('Test Application') {
             steps {
-                echo "Test de l'application..."
+                echo "Test et diagnostic de l'application..."
                 script {
                     def namespace = env.K8S_NAMESPACE
 
                     // Attendre que le pod soit prêt
                     sh """
-                        echo "Attente du démarrage du pod..."
-                        kubectl wait --for=condition=ready pod -l app=spring-app -n ${namespace} --timeout=300s || true
-                        
-                        # Obtenir le nom du pod
-                        POD_NAME=\$(kubectl get pods -l app=spring-app -n ${namespace} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-                        
-                        if [ -n "\$POD_NAME" ]; then
-                            echo "Pod trouvé: \$POD_NAME"
-                            # Tester la connectivité interne
-                            kubectl exec \$POD_NAME -n ${namespace} -- curl -s http://localhost:8080/actuator/health || echo "Test de santé échoué"
-                        else
-                            echo "Aucun pod trouvé"
-                        fi
-                    """
+                echo "=== Attente du démarrage du pod ==="
+                for i in {1..30}; do
+                    POD_STATUS=\$(kubectl get pods -l app=spring-app -n ${namespace} -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "NotFound")
+                    if [ "\$POD_STATUS" = "Running" ]; then
+                        echo "Pod en cours d'exécution"
+                        break
+                    fi
+                    echo "Attente (tentative \$i/30) - Statut: \$POD_STATUS"
+                    sleep 10
+                done
+            """
+
+                    // Diagnostic complet
+                    sh """
+                echo "=== Diagnostic complet ==="
+                
+                # 1. Vérifier les pods
+                echo "1. Pods:"
+                kubectl get pods -n ${namespace} -o wide
+                echo ""
+                
+                # 2. Vérifier les services
+                echo "2. Services:"
+                kubectl get svc -n ${namespace}
+                echo ""
+                
+                # 3. Vérifier les endpoints
+                echo "3. Endpoints:"
+                kubectl get endpoints -n ${namespace}
+                echo ""
+                
+                # 4. Vérifier les logs du pod
+                echo "4. Logs du pod:"
+                POD_NAME=\$(kubectl get pods -l app=spring-app -n ${namespace} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+                if [ -n "\$POD_NAME" ]; then
+                    echo "Pod: \$POD_NAME"
+                    kubectl logs \$POD_NAME -n ${namespace} --tail=30
+                fi
+                echo ""
+               
+                
+                # 5. Vérifier la configuration réseau
+                echo "5. Vérification réseau:"
+                echo "Minikube IP:"
+                minikube ip
+                echo ""
+                echo "Services exposés:"
+                minikube service list -n ${namespace}
+                echo ""
+            """
+
+                    // Tester via différentes méthodes
+                    sh """
+                echo "=== Tests de connectivité ==="
+                
+                # Méthode A: Port-forward (garantie de fonctionner si le pod tourne)
+                echo "Méthode A: Port-forward"
+                POD_NAME=\$(kubectl get pods -l app=spring-app -n ${namespace} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+                if [ -n "\$POD_NAME" ]; then
+                    timeout 30 kubectl port-forward pod/\$POD_NAME 8081:8080 -n ${namespace} &
+                    PF_PID=\$!
+                    sleep 5
+                    echo "Test sur localhost:8081..."
+                    curl -s -o /dev/null -w "HTTP Code: %{http_code}\\n" http://localhost:8081/actuator/health || echo "Échec du port-forward"
+                    kill \$PF_PID 2>/dev/null
+                fi
+                echo ""
+                
+                # Méthode B: Tester dans le pod directement
+                echo "Méthode B: Test interne au pod"
+                kubectl exec \$POD_NAME -n ${namespace} -- curl -s -o /dev/null -w "HTTP Code interne: %{http_code}\\n" http://localhost:8080/actuator/health || echo "Échec interne"
+                echo ""
+                
+                # Méthode C: Tester le service via ClusterIP
+                echo "Méthode C: Test via ClusterIP"
+                CLUSTER_IP=\$(kubectl get svc spring-service -n ${namespace} -o jsonpath='{.spec.clusterIP}')
+                CLUSTER_PORT=\$(kubectl get svc spring-service -n ${namespace} -o jsonpath='{.spec.ports[0].port}')
+                if [ -n "\$CLUSTER_IP" ] && [ -n "\$CLUSTER_PORT" ]; then
+                    echo "ClusterIP: \$CLUSTER_IP:\$CLUSTER_PORT"
+                    # Tester depuis un pod temporaire
+                    kubectl run test-curl --image=curlimages/curl -n ${namespace} --rm -i --restart=Never -- curl -s -o /dev/null -w "ClusterIP HTTP: %{http_code}\\n" http://\${CLUSTER_IP}:\${CLUSTER_PORT}/actuator/health || echo "Échec ClusterIP"
+                fi
+                echo ""
+            """
+
+                    // Exposer temporairement le service
+                    sh """
+                echo "=== Exposition temporaire du service ==="
+                echo "Pour accéder à l'application, exécutez:"
+                echo "  kubectl port-forward svc/spring-service 8080:8080 -n ${namespace} &"
+                echo "  curl http://localhost:8080/actuator/health"
+                echo ""
+                echo "Ou via NodePort (si configuré):"
+                minikube service spring-service -n ${namespace} --url || echo "Service non exposé"
+            """
                 }
             }
         }
     }
 
-    post {
-        always {
-            echo "Pipeline terminé - Status: ${currentBuild.result}"
-            cleanWs()  // Nettoyer l'espace de travail
-        }
-        success {
-            echo "Build, Push et Déploiement effectués avec succès!"
-            // Optionnel: Envoyer un email
-            emailext (
-                    subject: "SUCCÈS: Pipeline ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
-                    body: "Le pipeline a réussi!\n\nJob: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nURL: ${env.BUILD_URL}",
-                    to: 'votre-email@exemple.com'  // Remplacez par votre email
-            )
-        }
-        failure {
-            echo "Le pipeline a échoué."
-            // Optionnel: Envoyer un email d'erreur
-            emailext (
-                    subject: "ÉCHEC: Pipeline ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
-                    body: "Le pipeline a échoué!\n\nJob: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nURL: ${env.BUILD_URL}\n\nConsultez les logs pour plus de détails.",
-                    to: 'votre-email@exemple.com'  // Remplacez par votre email
-            )
-        }
-    }
 }
