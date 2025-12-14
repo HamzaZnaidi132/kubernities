@@ -1,6 +1,7 @@
 pipeline {
     agent any
 
+
     environment {
         IMAGE_NAME = "hamzakubernt/foyer_project"
         IMAGE_TAG  = "latest"
