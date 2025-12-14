@@ -3,7 +3,7 @@ pipeline {
 
 
     environment {
-        IMAGE_NAME = "hamzakubernt/foyer_project"
+        IMAGE_NAME = "hamzaznaidi/kubernities_project"
         IMAGE_TAG  = "latest"
         K8S_NAMESPACE = "devops"
     }
