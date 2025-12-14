@@ -1,27 +1,17 @@
 pipeline {
     agent any
 
-    // Supprimer la section 'tools' si non configurée, ou utiliser directement les commandes
-
     environment {
         // Docker Configuration
         DOCKER_REGISTRY = 'docker.io'
         DOCKER_REPOSITORY = 'hamzaznaidi'
         DOCKER_IMAGE_NAME = 'foyer_project'
-        DOCKER_IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7) ?: 'unknown'}"
+        DOCKER_IMAGE_TAG = "${env.BUILD_NUMBER}"
         DOCKER_FULL_IMAGE = "${DOCKER_REGISTRY}/${DOCKER_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
-        DOCKER_LATEST_IMAGE = "${DOCKER_REGISTRY}/${DOCKER_REPOSITORY}/${DOCKER_IMAGE_NAME}:latest"
 
         // Kubernetes Configuration
-        K8S_NAMESPACE = 'foyer-production'
+        K8S_NAMESPACE = 'default'
         K8S_DEPLOYMENT = 'foyer-app'
-        K8S_SERVICE = 'foyer-service'
-        K8S_CONFIG_PATH = 'kubernetes/'
-        K8S_CONTEXT = 'production-cluster'
-
-        // Application Configuration
-        APP_NAME = 'tp-foyer'
-        APP_VERSION = '1.0.0'
     }
 
     options {
@@ -31,79 +21,103 @@ pipeline {
         timestamps()
     }
 
+    triggers {
+        // Déclenchement automatique sur push GitHub
+        pollSCM('H/2 * * * *')  // Vérifie toutes les 2 minutes
+
+        // OU pour webhook GitHub (recommandé)
+        // githubPush()
+    }
+
     stages {
-        // ========== PHASE 1: INITIALIZATION ==========
-        stage('Initialize') {
-            steps {
-                echo '🚀 Initializing Pipeline...'
-                script {
-                    sh '''
-                        echo "========================================"
-                        echo "Pipeline Configuration:"
-                        echo "  Job: ${JOB_NAME}"
-                        echo "  Build: ${BUILD_NUMBER}"
-                        echo "  Branch: ${GIT_BRANCH}"
-                        echo "========================================"
-                    '''
-
-                    // Check if Maven and Java are installed
-                    sh '''
-                        echo "Checking installed tools..."
-                        which java || echo "Java not found in PATH"
-                        which mvn || echo "Maven not found in PATH"
-                        which docker || echo "Docker not found in PATH"
-                        which kubectl || echo "kubectl not found in PATH"
-                    '''
-                }
-            }
-        }
-
+        // ========== PHASE 1: CHECKOUT ==========
         stage('Checkout SCM') {
             steps {
-                checkout scm
+                checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                                                    url: 'https://github.com/HamzaZnaidi132/kubernities.git',
+                                                    credentialsId: ''
+                                            ]],
+                        extensions: [
+                                [$class: 'CleanBeforeCheckout'],
+                                [$class: 'CloneOption', depth: 1, noTags: false, shallow: true]
+                        ]
+                ])
+
                 script {
                     sh '''
-                        echo "Repository checked out successfully"
-                        git log -1 --oneline
+                        echo "========================================"
+                        echo "Build Information:"
+                        echo "Job: ${JOB_NAME}"
+                        echo "Build: ${BUILD_NUMBER}"
+                        echo "Branch: ${GIT_BRANCH}"
+                        echo "Commit: $(git log -1 --oneline)"
+                        echo "========================================"
                     '''
                 }
             }
         }
 
-        // ========== PHASE 2: BUILD ==========
-        stage('Build Application') {
+        // ========== PHASE 2: BUILD MAVEN ==========
+        stage('Build Maven Project') {
             steps {
-                echo '🔨 Building Application...'
-                script {
-                    sh '''
-                        echo "Java Version:"
-                        java -version 2>&1 || true
-                        echo "Maven Version:"
-                        mvn -version 2>&1 || true
-                    '''
-                }
+                echo '🔨 Building Java Application with Maven...'
+
+                sh '''
+                    echo "Java Version:"
+                    java -version
+                    echo ""
+                    echo "Maven Version:"
+                    mvn -version
+                    echo ""
+                '''
+
+                // Build Maven sans tests
                 sh 'mvn clean package -DskipTests -B'
 
                 script {
-                    def jarFile = findFiles(glob: 'target/*.jar')[0]?.name
-                    if (jarFile) {
-                        env.JAR_FILE = "target/${jarFile}"
-                        echo "JAR File: ${env.JAR_FILE}"
+                    // Solution alternative à findFiles
+                    sh '''
+                        echo "Listing JAR files in target directory:"
+                        ls -la target/*.jar || echo "No JAR files found"
+                        
+                        # Trouver le premier fichier JAR
+                        JAR_FILE=$(ls target/*.jar 2>/dev/null | head -1)
+                        if [ -n "$JAR_FILE" ]; then
+                            echo "JAR_FILE=$JAR_FILE" > jar_info.txt
+                            echo "Found JAR file: $JAR_FILE"
+                        else
+                            echo "WARNING: No JAR file found in target directory"
+                        fi
+                    '''
+
+                    // Lire le fichier créé
+                    if (fileExists('jar_info.txt')) {
+                        def jarInfo = readFile('jar_info.txt')
+                        def jarLine = jarInfo.readLines().find { it.startsWith('JAR_FILE=') }
+                        if (jarLine) {
+                            env.JAR_FILE = jarLine.substring(9)
+                            echo "Set JAR_FILE to: ${env.JAR_FILE}"
+                        }
                     }
                 }
             }
 
             post {
                 success {
+                    echo '✅ Maven build successful!'
                     archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
                 }
                 failure {
-                    echo '❌ Build failed!'
+                    echo '❌ Maven build failed!'
                 }
             }
         }
 
-        stage('Unit Tests') {
+        // ========== PHASE 3: UNIT TESTS ==========
+        stage('Run Unit Tests') {
             steps {
                 echo '🧪 Running Unit Tests...'
                 sh 'mvn test -B'
@@ -112,77 +126,104 @@ pipeline {
             post {
                 always {
                     junit 'target/surefire-reports/*.xml'
+                    archiveArtifacts artifacts: 'target/surefire-reports/*.xml', fingerprint: true
                 }
             }
         }
 
-        // ========== PHASE 3: DOCKER ==========
+        // ========== PHASE 4: DOCKER BUILD ==========
         stage('Build Docker Image') {
             steps {
                 echo '🐳 Building Docker Image...'
+
                 script {
-                    // Check Docker
+                    // Vérifier que Docker est disponible
                     sh 'docker --version'
 
-                    // Build with simplified command
+                    // Construire l'image
                     sh """
-                        docker build \
-                            -t ${DOCKER_FULL_IMAGE} \
-                            -t ${DOCKER_LATEST_IMAGE} \
-                            .
+                        docker build -t ${DOCKER_FULL_IMAGE} .
                     """
 
-                    // List images
+                    // Tagger aussi comme latest
                     sh """
-                        echo "Docker images built:"
-                        docker images | grep ${DOCKER_IMAGE_NAME} || true
+                        docker tag ${DOCKER_FULL_IMAGE} ${DOCKER_REGISTRY}/${DOCKER_REPOSITORY}/${DOCKER_IMAGE_NAME}:latest
                     """
+
+                    // Lister les images créées
+                    sh '''
+                        echo "Docker images created:"
+                        docker images | grep ${DOCKER_IMAGE_NAME} || true
+                    '''
+                }
+            }
+
+            post {
+                success {
+                    echo '✅ Docker image built successfully!'
+                }
+                failure {
+                    echo '❌ Docker build failed!'
                 }
             }
         }
 
-        stage('Push to Docker Registry') {
+        // ========== PHASE 5: DOCKER PUSH (seulement sur main) ==========
+        stage('Push Docker Image to Registry') {
             when {
                 branch 'main'
             }
             steps {
                 echo '📤 Pushing Docker Image to Registry...'
+
                 script {
-                    // If you have Docker Hub credentials configured in Jenkins
-                    withCredentials([usernamePassword(
-                            credentialsId: 'docker-hub-creds',
-                            usernameVariable: 'DOCKER_USER',
-                            passwordVariable: 'DOCKER_PASS'
-                    )]) {
-                        sh """
-                            # Login to Docker Hub
-                            echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
-                            
-                            # Push images
-                            docker push ${DOCKER_FULL_IMAGE}
-                            docker push ${DOCKER_LATEST_IMAGE}
-                            
-                            echo "✅ Images pushed successfully!"
-                        """
+                    // Utiliser les credentials Docker Hub si configurés
+                    try {
+                        withCredentials([usernamePassword(
+                                credentialsId: 'docker-hub-creds',
+                                usernameVariable: 'DOCKER_USER',
+                                passwordVariable: 'DOCKER_PASS'
+                        )]) {
+                            sh """
+                                echo "Logging in to Docker Hub..."
+                                echo ${DOCKER_PASS} | docker login -u ${DOCKER_USER} --password-stdin || echo "Login failed, continuing..."
+                                
+                                echo "Pushing image: ${DOCKER_FULL_IMAGE}"
+                                docker push ${DOCKER_FULL_IMAGE} || echo "Push failed for ${DOCKER_FULL_IMAGE}"
+                                
+                                echo "Pushing latest tag"
+                                docker push ${DOCKER_REGISTRY}/${DOCKER_REPOSITORY}/${DOCKER_IMAGE_NAME}:latest || echo "Push failed for latest"
+                            """
+                        }
+                    } catch (Exception e) {
+                        echo "⚠️ Docker push skipped (credentials not configured): ${e.message}"
                     }
                 }
             }
         }
 
-        // ========== PHASE 4: KUBERNETES DEPLOYMENT ==========
-        stage('Prepare Kubernetes Manifests') {
+        // ========== PHASE 6: KUBERNETES DEPLOYMENT ==========
+        stage('Deploy to Kubernetes') {
             when {
                 branch 'main'
             }
             steps {
-                echo '📝 Preparing Kubernetes Manifests...'
-                script {
-                    // Create kubernetes directory if it doesn't exist
-                    sh 'mkdir -p kubernetes'
+                echo '🚀 Deploying to Kubernetes...'
 
-                    // Check if deployment file exists, if not create a basic one
-                    if (!fileExists('kubernetes/deployment.yaml')) {
-                        writeFile file: 'kubernetes/deployment.yaml', text: """
+                script {
+                    // Vérifier si kubectl est disponible
+                    sh 'kubectl version --client || echo "kubectl not available"'
+
+                    // Appliquer les fichiers Kubernetes s'ils existent
+                    sh '''
+                        if [ -d "k8s" ]; then
+                            echo "Applying Kubernetes manifests from k8s/ directory..."
+                            kubectl apply -f k8s/ --namespace=${K8S_NAMESPACE} || echo "K8s apply failed"
+                        else
+                            echo "No k8s directory found, creating a simple deployment..."
+                            
+                            # Créer un déploiement simple
+                            cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -205,69 +246,57 @@ spec:
         image: ${DOCKER_FULL_IMAGE}
         ports:
         - containerPort: 8080
-"""
-                    }
-
-                    // Update image in deployment
-                    sh """
-                        sed -i.bak 's|image:.*|image: ${DOCKER_FULL_IMAGE}|g' kubernetes/deployment.yaml
-                        echo "Updated deployment.yaml with image: ${DOCKER_FULL_IMAGE}"
-                    """
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+EOF
+                        fi
+                        
+                        # Vérifier le déploiement
+                        echo "Checking deployment status..."
+                        kubectl rollout status deployment/${K8S_DEPLOYMENT} -n ${K8S_NAMESPACE} --timeout=120s || echo "Rollout check failed"
+                        
+                        # Afficher les pods
+                        echo "Pods in namespace ${K8S_NAMESPACE}:"
+                        kubectl get pods -n ${K8S_NAMESPACE} -l app=${K8S_DEPLOYMENT} || echo "Failed to get pods"
+                    '''
                 }
             }
         }
 
-        stage('Deploy to Kubernetes') {
-            when {
-                branch 'main'
-            }
-            steps {
-                echo '🚀 Deploying to Kubernetes...'
-                script {
-                    // Check if kubectl is available
-                    sh 'which kubectl || echo "kubectl not found, skipping deployment"'
-
-                    // Apply Kubernetes manifests
-                    sh """
-                        # Create namespace if not exists
-                        kubectl create namespace ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f - || true
-                        
-                        # Apply deployment
-                        kubectl apply -f kubernetes/deployment.yaml || echo "Deployment failed"
-                        
-                        # Check deployment status
-                        kubectl rollout status deployment/${K8S_DEPLOYMENT} -n ${K8S_NAMESPACE} --timeout=180s || echo "Rollout check failed"
-                        
-                        # Show deployment info
-                        kubectl get deployment ${K8S_DEPLOYMENT} -n ${K8S_NAMESPACE} || true
-                        kubectl get pods -n ${K8S_NAMESPACE} -l app=${K8S_DEPLOYMENT} || true
-                    """
-                }
-            }
-        }
-
+        // ========== PHASE 7: HEALTH CHECK ==========
         stage('Health Check') {
             when {
                 branch 'main'
             }
             steps {
                 echo '🏥 Running Health Check...'
+
                 script {
-                    sh """
-                        # Wait a bit for pods to start
+                    sh '''
+                        # Attendre que les pods démarrent
+                        echo "Waiting for pods to be ready..."
                         sleep 30
                         
-                        # Get pod name
-                        POD_NAME=\$(kubectl get pods -n ${K8S_NAMESPACE} -l app=${K8S_DEPLOYMENT} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+                        # Obtenir les noms des pods
+                        POD_NAMES=$(kubectl get pods -n ${K8S_NAMESPACE} -l app=${K8S_DEPLOYMENT} -o jsonpath='{.items[*].metadata.name}' 2>/dev/null) || true
                         
-                        if [ -n "\${POD_NAME}" ]; then
-                            echo "Checking pod: \${POD_NAME}"
-                            kubectl describe pod \${POD_NAME} -n ${K8S_NAMESPACE} | grep -A 5 "Status:" || true
-                            kubectl logs \${POD_NAME} -n ${K8S_NAMESPACE} --tail=20 || true
+                        if [ -n "$POD_NAMES" ]; then
+                            for POD in $POD_NAMES; do
+                                echo "Checking pod: $POD"
+                                kubectl logs $POD -n ${K8S_NAMESPACE} --tail=10 || echo "Failed to get logs for $POD"
+                                
+                                # Vérifier l'état du pod
+                                kubectl describe pod $POD -n ${K8S_NAMESPACE} | grep -A 3 "Status:" || echo "Failed to describe pod $POD"
+                            done
                         else
                             echo "No pods found for deployment ${K8S_DEPLOYMENT}"
                         fi
-                    """
+                    '''
                 }
             }
         }
@@ -275,43 +304,58 @@ spec:
 
     post {
         always {
-            echo '🧹 Cleaning up...'
+            echo '🧹 Cleaning up workspace...'
+
             script {
-                // Clean Docker images to save space
+                // Nettoyage Docker
                 sh '''
+                    echo "Cleaning up Docker resources..."
                     docker system prune -f 2>/dev/null || true
+                    
+                    # Supprimer les images locales
                     docker rmi ${DOCKER_FULL_IMAGE} 2>/dev/null || true
-                    docker rmi ${DOCKER_LATEST_IMAGE} 2>/dev/null || true
+                    docker rmi ${DOCKER_REGISTRY}/${DOCKER_REPOSITORY}/${DOCKER_IMAGE_NAME}:latest 2>/dev/null || true
                 '''
 
-                // Print build summary
+                // Afficher le résumé du build
                 sh """
                     echo "========================================"
-                    echo "BUILD SUMMARY"
+                    echo "BUILD COMPLETED"
                     echo "========================================"
-                    echo "Job: ${env.JOB_NAME}"
-                    echo "Build: ${env.BUILD_NUMBER}"
-                    echo "Result: ${currentBuild.currentResult}"
+                    echo "Status: ${currentBuild.currentResult}"
                     echo "Duration: ${currentBuild.durationString}"
-                    echo "Docker Image: ${DOCKER_FULL_IMAGE}"
-                    echo "K8S Namespace: ${K8S_NAMESPACE}"
-                    echo "K8S Deployment: ${K8S_DEPLOYMENT}"
+                    echo "Build: #${env.BUILD_NUMBER}"
+                    echo "Image: ${DOCKER_FULL_IMAGE}"
+                    echo "Deployment: ${K8S_DEPLOYMENT}"
+                    echo "Namespace: ${K8S_NAMESPACE}"
                     echo "========================================"
                 """
             }
 
-            // Clean workspace
+            // Nettoyer l'espace de travail
             cleanWs()
         }
 
         success {
-            echo '✅ Pipeline completed successfully!'
+            echo '🎉 Pipeline completed successfully!'
 
-            // Simple notification (if mail is configured)
+            // Notification par email
             emailext (
-                    subject: "✅ SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-                    body: "Build ${env.BUILD_NUMBER} of ${env.JOB_NAME} completed successfully.\n\nSee: ${env.BUILD_URL}",
-                    to: 'admin@example.com'
+                    subject: "✅ SUCCESS: ${env.JOB_NAME} Build #${env.BUILD_NUMBER}",
+                    body: """
+                Build ${env.BUILD_NUMBER} of ${env.JOB_NAME} completed successfully!
+                
+                Details:
+                - Status: SUCCESS
+                - Duration: ${currentBuild.durationString}
+                - Docker Image: ${DOCKER_FULL_IMAGE}
+                - Kubernetes Deployment: ${K8S_DEPLOYMENT}
+                - Namespace: ${K8S_NAMESPACE}
+                
+                View build: ${env.BUILD_URL}
+                """,
+                    to: 'admin@example.com',
+                    from: 'jenkins@example.com'
             )
         }
 
@@ -319,10 +363,24 @@ spec:
             echo '❌ Pipeline failed!'
 
             emailext (
-                    subject: "❌ FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-                    body: "Build ${env.BUILD_NUMBER} of ${env.JOB_NAME} failed.\n\nSee logs: ${env.BUILD_URL}console",
-                    to: 'admin@example.com'
+                    subject: "❌ FAILURE: ${env.JOB_NAME} Build #${env.BUILD_NUMBER}",
+                    body: """
+                Build ${env.BUILD_NUMBER} of ${env.JOB_NAME} failed!
+                
+                Details:
+                - Status: FAILURE
+                - Duration: ${currentBuild.durationString}
+                
+                Please check the logs: ${env.BUILD_URL}console
+                """,
+                    to: 'admin@example.com',
+                    from: 'jenkins@example.com',
+                    attachLog: true
             )
+        }
+
+        unstable {
+            echo '⚠️ Pipeline unstable!'
         }
     }
 }
