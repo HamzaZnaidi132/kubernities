@@ -124,7 +124,7 @@ pipeline {
             emailext (
                     subject: "SUCCÈS: Pipeline ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
                     body: "Le pipeline a réussi!\n\nJob: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nURL: ${env.BUILD_URL}",
-                    to: 'votre-email@exemple.com'  // Remplacez par votre email
+                    to: 'hamzaznaidi539@gmail.com'  // Remplacez par votre email
             )
         }
         failure {
@@ -133,7 +133,7 @@ pipeline {
             emailext (
                     subject: "ÉCHEC: Pipeline ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
                     body: "Le pipeline a échoué!\n\nJob: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nURL: ${env.BUILD_URL}\n\nConsultez les logs pour plus de détails.",
-                    to: 'votre-email@exemple.com'  // Remplacez par votre email
+                    to: 'hamzaznaidi539@gmail.com'  // Remplacez par votre email
             )
         }
     }
